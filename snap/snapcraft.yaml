@@ -1,0 +1,119 @@
+name: bolt
+base: core26
+adopt-info: bolt
+summary: Thunderbolt device management daemon (org.freedesktop.bolt) as a provider snap
+description: |
+  The boltd system daemon (org.freedesktop.bolt) packaged as a provider
+  snap for Ubuntu Core Desktop, restoring the fat base's thunderbolt
+  functionality. Staged from the same resolute bolt (0.9.10) build the
+  fat base shipped (the staged daemon is byte-identical to the fat
+  tree's /usr/libexec/boltd).
+
+  The daemon is strictly confined: its slot policy lives in the snapd
+  fork's `bolt` interface (peer-less dbus receive rules, the
+  /var/lib/boltd state store, thunderbolt sysfs access); the plain
+  `dbus` slot provides activation and name ownership; clients connect
+  through the `bolt` interface's plug.
+
+  base is plain core26: the daemon execs no host helpers (unlike
+  accounts-daemon's adduser/chpasswd chain), and everything it links
+  is either staged with the deb or in the base.
+
+grade: stable
+confinement: strict
+
+slots:
+  # Activation + name ownership: snapd writes the
+  # /var/lib/snapd/dbus-1/system-services entry and the /etc/dbus-1/system.d
+  # conf (root may own org.freedesktop.bolt) for this slot; the app
+  # activates on it.
+  bolt-dbus:
+    interface: dbus
+    bus: system
+    name: org.freedesktop.bolt
+  # Interface-specific policy slot (state store, thunderbolt sysfs,
+  # dbus receive), defined in the snapd fork.
+  bolt:
+    interface: bolt
+
+plugs:
+  # polkit authorization for the daemon's privileged operations (enroll,
+  # authorize, manage). The action XML is delivered to
+  # /usr/share/polkit-1/actions on connection (snapd REQUIRES action XML
+  # at meta/polkit for a polkit plug). This is the identical policy the
+  # desktop variant already bakes, so polkitd sees each action id twice
+  # until a variant pass drops the baked copy (flagged, not silently
+  # changed).
+  polkit:
+    action-prefix: org.freedesktop.bolt
+  # Client plug used by the boltctl command-line tool shipped by this
+  # same snap (confined-client canary; deny-auto-connection on the slot
+  # blocks the same-snap auto-connect, so it rides a gadget connection).
+  bolt-client:
+    interface: bolt
+
+apps:
+  boltd:
+    command: usr/libexec/boltd
+    daemon: dbus
+    daemon-scope: system
+    activates-on:
+      - bolt-dbus
+    plugs:
+      - polkit
+    slots:
+      - bolt
+
+  boltctl:
+    command: usr/bin/boltctl
+    plugs:
+      - bolt-client
+
+layout:
+  # The daemon keeps its enrolled-device store at its compiled-in
+  # /var/lib/boltd path (StateDirectory=boltd in the baked unit). That
+  # path cannot be served from the host: snap-confine builds snap mount
+  # namespaces from the base rootfs plus a fixed whitelist of host
+  # mounts, and /var/lib/boltd is in neither. Bind the snap's own
+  # writable $SNAP_COMMON there instead.
+  /var/lib/boltd:
+    bind: $SNAP_COMMON
+
+parts:
+  bolt:
+    plugin: nil
+    stage-packages:
+      - bolt
+    override-build: |
+      craftctl default
+      deb_dir="/root/parts/bolt/stage_packages"
+      craftctl set version="$(dpkg-deb -f "$deb_dir"/bolt_*.deb Version)"
+    stage:
+      - -usr/share/doc
+      - -usr/share/man
+      - -usr/share/lintian
+      # the deb's activation entry and systemd unit are superseded by
+      # snapd's own (they also stay inert inside the snap; drop them so
+      # nothing can mistake this snap for a host-side service provider)
+      - -usr/lib/systemd/system/bolt.service
+      - -usr/share/dbus-1/system-services
+      - -usr/share/dbus-1/system.d
+      # 90-bolt.rules only sets SYSTEMD_WANTS+=bolt.service (start the
+      # baked host unit on hotplug); inside the snap it is inert. It
+      # stays staged (fat-base parity) but no udev-file attribute is
+      # declared: thunderbolt access is pure sysfs, AppArmor-path
+      # mediated, and snapd's udev parser cannot use this rule for
+      # device tagging anyway.
+
+  # The polkit plug REQUIRES action XML at meta/polkit/<plug>.*.policy
+  # (snapd aborts profile setup with "cannot find any policy files"
+  # otherwise — the fprintd boot-1 lesson). Same bytes as the variant's
+  # baked file (md5 384e8c226d007aa2e11de9a79aa29a85).
+  policy:
+    plugin: nil
+    after:
+      - bolt
+    override-build: |
+      install -Dm644 \
+        "${CRAFT_PROJECT_DIR}/polkit/org.freedesktop.bolt.policy" \
+        "${CRAFT_PART_INSTALL}/meta/polkit/polkit.org.freedesktop.bolt.policy"
